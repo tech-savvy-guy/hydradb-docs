@@ -2,6 +2,31 @@
 @import 'fumadocs-ui/css/shadcn.css';
 @import 'fumadocs-ui/css/preset.css';
 
+/* Keep viewport scrollbar consistent with Fumadocs scroll containers. */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-fd-border, var(--border));
+  border-radius: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: none;
+}
+
+::-webkit-scrollbar-corner {
+  display: none;
+}
+
+html,
+body {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-fd-border, var(--border)) transparent;
+}
+
 :root {
   --background: oklch(0.9706 0.0017 67.8024);
   --foreground: oklch(0.1994 0.0039 106.7490);
