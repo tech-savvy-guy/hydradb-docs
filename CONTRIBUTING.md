@@ -11,7 +11,7 @@ This guide explains how to add new content pages to this repository.
 
 ## Project Structure
 
-- Docs content lives in: `/home/runner/work/hydradb-docs/hydradb-docs/content/docs`
+- Docs content lives in: `content/docs`
 - Each page is an `.mdx` file with frontmatter (`title`, `description`)
 - Pages are served under `/docs/...`
 
