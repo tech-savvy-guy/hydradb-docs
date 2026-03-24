@@ -13,6 +13,6 @@ export function baseOptions(): BaseLayoutProps {
     },
     themeSwitch: {
       enabled: false,
-    },
+    }
   };
 }

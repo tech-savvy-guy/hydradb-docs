@@ -1,0 +1,764 @@
+---
+title: Customer Support Agent
+description: Build a customer support agent with Next.js, HydraDB, and the Vercel AI SDK that answers from a shared knowledge base, remembers customer history, and gets more useful over time.
+---
+
+import { Step, Steps } from "@/components/steps";
+import { Tab, Tabs } from "@/components/tabs";
+
+GitHub Repository: [tech-savvy-guy/customer-support-agent-hydradb](https://github.com/tech-savvy-guy/customer-support-agent-hydradb)
+
+## Overview
+
+This example shows how to build a customer support assistant that combines two kinds of context:
+
+- **Shared knowledge** — for policies, FAQs, order data, and support rules.
+- **User memory** — for customer-specific history, preferences, and past conversations.
+
+## Architecture
+
+![architecture-diagram](/customer-support-agent-architecture.png)
+
+## Understanding the Data Model
+
+Before you run anything, it helps to understand the scope of each HydraDB identifier:
+
+- `HYDRADB_TENANT_ID` is the top-level workspace for the whole application. It contains the shared knowledge base.
+- `HYDRADB_SUB_TENANT_ID` is the shared support knowledge space. Each user gets their own user memory scope, based on their `user_id`
+
+A practical mental model looks like this:
+
+```text
+tenant: customer-support-agent
+|
++-- sub-tenant: knowledge-base
+|   +-- guidelines.md
+|   +-- orders.json
+|   +-- terms.md
+|
++-- user-memory: user_a1b2c3
+|   +-- seeded conversation history
+|   +-- later chat exchanges
+|
++-- user-memory: user_x9y8z7
+    +-- that user's own conversation history
+```
+
+This separation matters because it prevents one customer's memory from leaking into another customer's session while still letting everyone share the same knowledge base.
+
+## Step-by-Step Guide
+
+<Steps>
+  <Step>
+    ### Clone the repository
+
+    ```bash
+    git clone https://github.com/tech-savvy-guy/customer-support-agent-hydradb.git
+    cd customer-support-agent-hydradb
+    ```
+
+    You should see folders such as `app/`, `components/`, `lib/`, and `data/`.
+
+  </Step>
+
+  <Step>
+    ### Install dependencies
+
+    ```bash
+    pnpm install
+    ```
+
+  </Step>
+
+  <Step>
+    ### Add your environment variables
+
+    Create a `.env` file in the project root:
+
+    ```bash
+    HYDRADB_API_KEY=your_hydradb_api_key
+    AI_GATEWAY_API_KEY=your_ai_gateway_key
+
+    HYDRADB_TENANT_ID=customer-support-agent
+    HYDRADB_SUB_TENANT_ID=knowledge-base
+    ```
+
+  </Step>
+
+  <Step>
+    ### Upload the knowledge base
+
+    Before the assistant can answer with company context, upload the sample knowledge files into HydraDB.
+
+    <Tabs items={['guidelines.md', 'orders.json', 'terms.md']}>
+      <Tab>
+        ```md title="data/guidelines.md"
+        ## Customer Support Guidelines
+
+        ### Support Principles
+
+        - Prioritize clarity over speed
+        - Maintain a polite, professional, and empathetic tone
+        - Avoid assumptions; ask clarifying questions when needed
+        - Focus on resolving the issue in the fewest steps possible
+
+        ### Response Framework
+
+        1. Acknowledge the issue
+        2. Show empathy
+        3. Provide clear steps or resolution
+        4. Offer further assistance
+
+        ### Do’s
+
+        - Personalize responses using the customer’s name
+        - Keep responses concise but helpful
+        - Confirm resolution when appropriate
+        - Use simple, easy-to-understand language
+
+        ### Don’ts
+
+        - Do not blame the customer
+        - Avoid technical jargon unless necessary
+        - Do not provide incorrect or speculative information
+        - Avoid overly long or robotic responses
+
+        ### Escalation Rules
+
+        Escalate when:
+
+        - Payment issues exceed $100
+        - Security concerns are raised
+        - Legal or policy-related queries arise
+        - Issue remains unresolved after multiple attempts
+
+        ### Tone Examples
+
+        - Good: “I understand how frustrating this must be, let me help you fix it.”
+        - Bad: “This issue is not our responsibility.”
+        ```
+      </Tab>
+      <Tab>
+        ```json title="data/orders.json"
+        {
+            "customer_id": "HYDRADB_USER_1",
+            "name": "HydraDB User",
+            "email": "hydradb.user@example.com",
+            "phone": "+1-123-456-7890",
+            "orders": [
+              {
+                "order_id": "HS1001",
+                "date": "2026-02-10",
+                "status": "Delivered",
+                "total_amount": 39,
+                "currency": "USD",
+                "items": [
+                  {
+                    "product_id": "P100",
+                    "name": "Wireless Headphones",
+                    "quantity": 1,
+                    "price": 29
+                  },
+                  {
+                    "product_id": "P101",
+                    "name": "USB-C Cable",
+                    "quantity": 2,
+                    "price": 5
+                  }
+                ],
+                "payment": {
+                  "method": "UPI",
+                  "status": "Paid"
+                },
+                "delivery": {
+                  "address": {
+                    "street": "221B Baker Street",
+                    "city": "London",
+                    "state": "",
+                    "postal_code": "NW1 6XE",
+                    "country": "UK"
+                  },
+                  "delivered_on": "2026-02-13"
+                }
+              },
+              {
+                "order_id": "HS1002",
+                "date": "2026-02-18",
+                "status": "Returned",
+                "total_amount": 49,
+                "currency": "USD",
+                "items": [
+                  {
+                    "product_id": "P200",
+                    "name": "Smart Watch",
+                    "quantity": 1,
+                    "price": 49
+                  }
+                ],
+                "payment": {
+                  "method": "Credit Card",
+                  "status": "Paid"
+                },
+                "delivery": {
+                  "address": {
+                    "street": "1600 Amphitheatre Parkway",
+                    "city": "Mountain View",
+                    "state": "CA",
+                    "postal_code": "94043",
+                    "country": "USA"
+                  },
+                  "delivered_on": "2026-02-20"
+                },
+                "return": {
+                  "initiated_on": "2026-02-22",
+                  "status": "Completed",
+                  "refund_status": "Processed",
+                  "refund_date": "2026-02-25"
+                }
+              },
+              {
+                "order_id": "HS1003",
+                "date": "2026-03-05",
+                "status": "Shipped",
+                "total_amount": 75,
+                "currency": "USD",
+                "items": [
+                  {
+                    "product_id": "P300",
+                    "name": "Bluetooth Speaker",
+                    "quantity": 1,
+                    "price": 65
+                  },
+                  {
+                    "product_id": "P301",
+                    "name": "Carrying Case",
+                    "quantity": 1,
+                    "price": 10
+                  }
+                ],
+                "payment": {
+                  "method": "Debit Card",
+                  "status": "Paid"
+                },
+                "delivery": {
+                  "address": {
+                    "street": "4-2-8 Shibaura",
+                    "city": "Minato City",
+                    "state": "Tokyo",
+                    "postal_code": "108-0023",
+                    "country": "Japan"
+                  },
+                  "estimated_delivery": "2026-03-25",
+                  "tracking_id": "TRK9384756"
+                }
+              },
+              {
+                "order_id": "HS1004",
+                "date": "2026-03-15",
+                "status": "Processing",
+                "total_amount": 27,
+                "currency": "USD",
+                "items": [
+                  {
+                    "product_id": "P400",
+                    "name": "Phone Case",
+                    "quantity": 3,
+                    "price": 9
+                  }
+                ],
+                "payment": {
+                  "method": "Cash on Delivery",
+                  "status": "Pending"
+                },
+                "delivery": {
+                  "address": {
+                    "street": "Plot 12, MG Road",
+                    "city": "Bengaluru",
+                    "state": "Karnataka",
+                    "postal_code": "560001",
+                    "country": "India"
+                  }
+                }
+              },
+              {
+                "order_id": "HS1005",
+                "date": "2026-03-20",
+                "status": "Cancelled",
+                "total_amount": 35,
+                "currency": "USD",
+                "items": [
+                  {
+                    "product_id": "P500",
+                    "name": "Fitness Band",
+                    "quantity": 1,
+                    "price": 35
+                  }
+                ],
+                "payment": {
+                  "method": "UPI",
+                  "status": "Refunded"
+                },
+                "cancellation": {
+                  "reason": "User requested cancellation",
+                  "cancelled_on": "2026-03-20",
+                  "refund_date": "2026-03-21"
+                }
+              }
+            ]
+          }
+        ```
+      </Tab>
+      <Tab>
+        ```md title="data/terms.md"
+        ## Terms & Conditions
+
+        ### 1. Account Usage
+
+        * Users must provide accurate information
+        * Users are responsible for account security
+        * We may suspend accounts for suspicious activity
+
+        ### 2. Orders & Payments
+
+        * Orders are confirmed after successful payment
+        * Prices are subject to change without notice
+        * We may cancel orders due to errors or stock issues
+
+        ### 3. Shipping & Delivery
+
+        * Delivery timelines are estimates only
+        * Delays may occur due to external factors
+        * Risk transfers upon delivery
+
+        ### 4. Returns & Refunds
+
+        * Returns accepted within 14 days
+        * Items must be unused and in original packaging
+        * Refunds processed within 5–7 business days
+
+        ### 5. Prohibited Use
+
+        Users may not:
+
+        * Engage in fraudulent activity
+        * Attempt unauthorized access
+        * Misuse the platform for illegal purposes
+
+        ### 6. Liability
+
+        * We are not liable for indirect damages
+        * Liability is limited to the purchase value
+
+        ### 7. Updates
+
+        * Terms may be updated at any time
+        * Continued use implies acceptance
+        ```
+      </Tab>
+    </Tabs>
+
+    Upload them into tenant: `customer-support-agent` and sub-tenant: `knowledge-base`
+
+    <Tabs items={['Python', 'Typescript']}>
+      <Tab>
+        ```python
+        import os
+        import dotenv
+        dotenv.load_dotenv()
+        from hydra_db import HydraDB
+
+        client = HydraDB(token=os.environ["HYDRADB_API_KEY"])
+
+        TENANT_ID = "customer-support-agent"
+        SUB_TENANT_ID = "knowledge-base"
+
+        # Create a new tenant
+        response = client.tenant.create(tenant_id=TENANT_ID)
+        print(response)
+
+        # Check if the tenant is READY
+        status = client.tenant.monitor(tenant_id=TENANT_ID)
+        print(status)
+
+        # Upload the Knowledge Base
+        files = ["data/guidelines.md", "data/orders.json", "data/terms.md"]
+
+        for file in files:
+            with open(file, 'rb') as f:
+                upload_result = client.upload.knowledge(
+                    tenant_id=TENANT_ID,
+                    sub_tenant_id=SUB_TENANT_ID,
+                    files=[f],
+                )
+                print(upload_result)
+        ```
+      </Tab>
+      <Tab>
+        ```typescript
+        import fs from "node:fs";
+        import path from "node:path";
+
+        import { HydraDBClient } from "@hydra_db/node";
+
+        const token: string = process.env.HYDRADB_API_KEY!;
+
+        const client = new HydraDBClient({ token });
+
+        const TENANT_ID = "customer-support-agent";
+        const SUB_TENANT_ID = "knowledge-base";
+
+        async function main(): Promise<void> {
+          // Create a new tenant
+          const response = await client.tenant.create({
+            tenant_id: TENANT_ID,
+          });
+          console.log(response);
+
+          // Check if the tenant is READY
+          const status = await client.tenant.monitor({
+            tenant_id: TENANT_ID,
+          });
+          console.log(status);
+
+          // Upload the Knowledge Base
+          const files = ["data/guidelines.md", "data/orders.json", "data/terms.md"];
+
+          for (const file of files) {
+            const uploadResult = await client.upload.knowledge({
+              tenant_id: TENANT_ID,
+              sub_tenant_id: SUB_TENANT_ID,
+              files: [fs.readFileSync(path.resolve(file))],
+            });
+
+            console.log(uploadResult);
+          }
+        }
+
+        main().catch((error) => {
+          console.error(error);
+          process.exit(1);
+        });
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step>
+    ### Start the app
+
+    Run the development server:
+
+    ```bash
+    pnpm dev
+    ```
+
+    Your app will be available at: [http://localhost:3000](http://localhost:3000)
+
+  </Step>
+</Steps>
+
+## How The Essentials Work
+
+The rest of this page explains the main pieces in plain English, with simplified code snippets. These snippets are meant to show the pattern clearly, not mirror every line of the example one-for-one.
+
+### 1. Shared Knowledge And User Memory Are Stored Separately
+
+The app keeps business knowledge and personal memory in different scopes.
+
+```ts
+const tenantId = process.env.HYDRADB_TENANT_ID!;
+const knowledgeBaseId = process.env.HYDRADB_SUB_TENANT_ID!;
+
+function getKnowledgeScope() {
+  return {
+    tenant_id: tenantId,
+    sub_tenant_id: knowledgeBaseId,
+  };
+}
+
+function getUserScope(userId: string) {
+  return {
+    tenant_id: tenantId,
+    user_id: userId,
+  };
+}
+```
+
+Why this matters:
+
+- shared support documents should be visible to all users
+- personal history should only apply to one user
+- separating them makes recall easier to reason about
+
+### 2. The Browser Creates A Stable Demo User ID
+
+To make the demo feel personalized, the app needs a stable browser-level identifier.
+
+```ts
+const STORAGE_KEY = "customer-support-user-id";
+
+export function getOrCreateUserId() {
+  const existing = localStorage.getItem(STORAGE_KEY);
+
+  if (existing) {
+    return existing;
+  }
+
+  const nextUserId = `user_${crypto.randomUUID()}`;
+  localStorage.setItem(STORAGE_KEY, nextUserId);
+  return nextUserId;
+}
+```
+
+This ID is the anchor for everything user-specific:
+
+- onboarding data
+- recalled memories
+- new saved chat exchanges
+
+Without a stable ID, every refresh would feel like a brand-new customer.
+
+### 3. First-Time Onboarding Seeds Useful Memory
+
+The example improves the first chat experience by writing a starter conversation into HydraDB before the user asks anything.
+
+```ts
+async function seedUserMemory(userId: string, conversation: string) {
+  await fetch("https://api.hydradb.com/memory/add", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.HYDRADB_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      tenant_id: process.env.HYDRADB_TENANT_ID,
+      user_id: userId,
+      content: conversation,
+      infer: true,
+    }),
+  });
+}
+```
+
+The important part is `infer: true`.
+
+That tells HydraDB to do more than just store raw text. It can infer useful signals such as:
+
+- customer preferences
+- past problems
+- recurring topics
+- likely support context
+
+So instead of starting from zero, the assistant begins with a memory baseline.
+
+### 4. Knowledge Recall Answers "What Does The Business Know?"
+
+Shared knowledge is usually recalled from the app's common support space.
+
+```ts
+async function recallKnowledge(query: string) {
+  const response = await fetch("https://api.hydradb.com/recall/full_recall", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.HYDRADB_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      tenant_id: process.env.HYDRADB_TENANT_ID,
+      sub_tenant_id: process.env.HYDRADB_SUB_TENANT_ID,
+      query,
+      max_results: 6,
+    }),
+  });
+
+  return response.json();
+}
+```
+
+Think of this as the answer to:
+
+> What company documents, policies, and support records matter for this question?
+
+For a refund question, this might return:
+
+- refund policy chunks
+- order records
+- terms and conditions
+
+### 5. User Memory Recall Answers "What Should We Remember About This Customer?"
+
+User memory is recalled separately from the shared knowledge base.
+
+```ts
+async function recallUserMemory(userId: string, query: string) {
+  const response = await fetch("https://api.hydradb.com/memory/recall", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.HYDRADB_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      tenant_id: process.env.HYDRADB_TENANT_ID,
+      user_id: userId,
+      query,
+    }),
+  });
+
+  return response.json();
+}
+```
+
+This is what keeps the assistant from answering every user as if they were anonymous.
+
+For example, memory might tell the agent that:
+
+- the customer already asked about the same order last week
+- they prefer short answers
+- they recently changed their address
+
+### 6. The Chat Route Retrieves Both In Parallel
+
+A clean server implementation retrieves both kinds of context at the same time.
+
+```ts
+async function getSupportContext(userId: string, question: string) {
+  const [memory, knowledge] = await Promise.all([
+    recallUserMemory(userId, question),
+    recallKnowledge(question),
+  ]);
+
+  return { memory, knowledge };
+}
+```
+
+This is a small detail, but it matters:
+
+- it keeps the route faster
+- it keeps the retrieval layers independent
+- it makes debugging easier because each source has a clear job
+
+### 7. Retrieved Context Is Turned Into A Prompt The Model Can Use
+
+Models work best when retrieved context is formatted clearly instead of dumped in as raw JSON.
+
+```ts
+function buildSystemPrompt({
+  memoryText,
+  knowledgeText,
+}: {
+  memoryText: string;
+  knowledgeText: string;
+}) {
+  return `
+You are a customer support assistant.
+
+Use the user memory for personalized context.
+Use the knowledge base for policy and business facts.
+
+User memory:
+${memoryText || "No relevant user memory found."}
+
+Knowledge base:
+${knowledgeText || "No relevant knowledge found."}
+
+If the answer is uncertain, say what is missing instead of guessing.
+  `.trim();
+}
+```
+
+The system prompt usually has three jobs:
+
+- define the assistant's role
+- inject retrieved context in a readable structure
+- tell the model how to behave when context is missing
+
+That last point is important for support systems. You want honest uncertainty, not confident guessing.
+
+### 8. The Vercel AI SDK Streams The Answer Back To The UI
+
+Once the context is assembled, the server can stream the response.
+
+```ts
+import { streamText } from "ai";
+
+export async function POST(req: Request) {
+  const { messages, userId } = await req.json();
+  const latestMessage = messages.at(-1)?.content ?? "";
+
+  const { memory, knowledge } = await getSupportContext(userId, latestMessage);
+  const system = buildSystemPrompt({
+    memoryText: formatMemory(memory),
+    knowledgeText: formatKnowledge(knowledge),
+  });
+
+  const result = streamText({
+    model: supportModel,
+    system,
+    messages,
+  });
+
+  return result.toUIMessageStreamResponse();
+}
+```
+
+Why streaming matters:
+
+- users get feedback immediately
+- long answers feel faster
+- the UI feels like a real support assistant instead of a blocking form submit
+
+### 9. The New Exchange Is Saved Back As Memory
+
+After the answer is complete, the app stores the new conversation so the next turn has more context.
+
+```ts
+async function saveExchange(
+  userId: string,
+  userMessage: string,
+  assistantMessage: string,
+) {
+  await fetch("https://api.hydradb.com/memory/add", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.HYDRADB_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      tenant_id: process.env.HYDRADB_TENANT_ID,
+      user_id: userId,
+      content: `User: ${userMessage}\nAssistant: ${assistantMessage}`,
+      infer: true,
+    }),
+  });
+}
+```
+
+This is the compounding part of the system:
+
+- question one creates context for question two
+- question two creates context for question three
+- over time the assistant becomes more familiar with the customer
+
+### 10. The Side Panels Are More Than UI Decoration
+
+The Knowledge Base and User Memories panels are useful because they expose the app's hidden state.
+
+When the assistant sounds generic, check the panels:
+
+- if knowledge is empty, your uploads or tenant settings are probably wrong
+- if user memory is empty, onboarding or memory writes probably failed
+- if both are present but the answer is still weak, the prompt or model instructions need work
+
+This makes the example easier to learn from because you can inspect the retrieval inputs instead of guessing.
+
+## Summary
+
+This example is valuable because it shows a complete support loop, not just a chat box:
+
+- HydraDB stores shared business knowledge
+- HydraDB stores customer-specific memory
+- the server retrieves both before every answer
+- the Vercel AI SDK streams the response
+- the app saves the final exchange back as memory
+
+That is the essential pattern behind a support agent that can be both accurate and personal.
