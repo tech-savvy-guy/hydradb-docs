@@ -1,6 +1,8 @@
 import './global.css';
 import { Metadata } from 'next';
 import { Geist, Geist_Mono } from 'next/font/google';
+
+import SearchDialog from '@/components/search';
 import { RootProvider } from 'fumadocs-ui/provider/next';
 
 const geist = Geist({
@@ -24,7 +26,7 @@ export default function Layout({ children }: LayoutProps<'/'>) {
   return (
     <html lang="en" className={`${geist.variable} ${geistMono.variable} antialiased`} suppressHydrationWarning>
       <body className="flex flex-col font-sans min-h-screen">
-        <RootProvider theme={{ enabled: false }}>
+        <RootProvider search={{ SearchDialog }} theme={{ enabled: false }}>
           {children}
         </RootProvider>
       </body>
