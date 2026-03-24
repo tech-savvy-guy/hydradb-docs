@@ -457,308 +457,325 @@ This separation matters because it prevents one customer's memory from leaking i
   </Step>
 </Steps>
 
-## How The Essentials Work
+## Understanding The Essentials
 
-The rest of this page explains the main pieces in plain English, with simplified code snippets. These snippets are meant to show the pattern clearly, not mirror every line of the example one-for-one.
+These are the five pieces that actually make the example work.
 
-### 1. Shared Knowledge And User Memory Are Stored Separately
+### 1. Split Knowledge From Memory
 
-The app keeps business knowledge and personal memory in different scopes.
+This example uses one tenant for the whole app and then separates data by sub-tenant. The shared knowledge base lives under the default `"knowledge-base"` sub-tenant, while each user gets their own sub-tenant based on their demo user ID.
 
-```ts
-const tenantId = process.env.HYDRADB_TENANT_ID!;
-const knowledgeBaseId = process.env.HYDRADB_SUB_TENANT_ID!;
+```ts title="customer-support-agent/lib/hydradb.ts"
+import { HydraDBClient } from "@hydra_db/node"
 
-function getKnowledgeScope() {
-  return {
-    tenant_id: tenantId,
-    sub_tenant_id: knowledgeBaseId,
-  };
-}
+/** Default tenant for this demo app; override with HYDRADB_TENANT_ID. */
+export const TENANT_ID =
+  process.env.HYDRADB_TENANT_ID ?? "customer-support-agent"
 
-function getUserScope(userId: string) {
-  return {
-    tenant_id: tenantId,
-    user_id: userId,
-  };
+/** Optional sub-tenant for namespacing within a tenant. */
+export const SUB_TENANT_ID = process.env.HYDRADB_SUB_TENANT_ID ?? "knowledge-base"
+
+let _client: HydraDBClient | null | undefined
+
+/**
+ * Singleton HydraDB client. Returns `null` when HYDRADB_API_KEY is not set
+ * (chat still works, but recall / memory persistence are skipped).
+ */
+export function getHydraClient(): HydraDBClient | null {
+  if (_client !== undefined) {
+    return _client
+  }
+  const token = process.env.HYDRADB_API_KEY
+  if (!token) {
+    _client = null
+    return _client
+  }
+  _client = new HydraDBClient({ token })
+  return _client
 }
 ```
 
-Why this matters:
+### 2. Create A Stable User ID
 
-- shared support documents should be visible to all users
-- personal history should only apply to one user
-- separating them makes recall easier to reason about
+The app does not ask the user to sign in. Instead, it creates a local demo ID once, stores it in `localStorage`, and reuses it across reloads. That is the identifier used for onboarding, recall, and saving future memory. The `isNew` flag is equally important, because it tells the app whether it should seed starter memory on first load.
 
-### 2. The Browser Creates A Stable Demo User ID
-
-To make the demo feel personalized, the app needs a stable browser-level identifier.
-
-```ts
-const STORAGE_KEY = "customer-support-user-id";
-
-export function getOrCreateUserId() {
-  const existing = localStorage.getItem(STORAGE_KEY);
-
-  if (existing) {
-    return existing;
+```ts title="customer-support-agent/lib/user.ts"
+export function getOrCreateDemoUserIdWithNewFlag(): { userId: string; isNew: boolean } {
+  if (typeof window === "undefined") {
+    return {
+      userId: `${USER_ID_PREFIX}${nanoid(16)}`,
+      isNew: true,
+    }
   }
 
-  const nextUserId = `user_${crypto.randomUUID()}`;
-  localStorage.setItem(STORAGE_KEY, nextUserId);
-  return nextUserId;
+  const existing = normalizeDemoUserId(
+    window.localStorage.getItem(USER_ID_STORAGE_KEY),
+  )
+  if (existing) {
+    return {
+      userId: existing,
+      isNew: false,
+    }
+  }
+
+  const created = `${USER_ID_PREFIX}${nanoid(16)}`
+  window.localStorage.setItem(USER_ID_STORAGE_KEY, created)
+  return {
+    userId: created,
+    isNew: true,
+  }
 }
 ```
 
-This ID is the anchor for everything user-specific:
-
-- onboarding data
-- recalled memories
-- new saved chat exchanges
-
-Without a stable ID, every refresh would feel like a brand-new customer.
-
-### 3. First-Time Onboarding Seeds Useful Memory
-
-The example improves the first chat experience by writing a starter conversation into HydraDB before the user asks anything.
-
-```ts
-async function seedUserMemory(userId: string, conversation: string) {
-  await fetch("https://api.hydradb.com/memory/add", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.HYDRADB_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      tenant_id: process.env.HYDRADB_TENANT_ID,
-      user_id: userId,
-      content: conversation,
-      infer: true,
-    }),
-  });
-}
+```ts title="customer-support-agent/app/page.tsx"
+  useEffect(() => {
+    const { userId: id, isNew: isNeverUser } = getOrCreateDemoUserIdWithNewFlag()
+    setUserId(id)
+    setIsNew(isNeverUser)
+  }, [])
 ```
 
-The important part is `infer: true`.
+### 3. Seed Memory On First Load
 
-That tells HydraDB to do more than just store raw text. It can infer useful signals such as:
+When `isNew` is true, the app calls `/api/onboard`. That route loads `data/conversation.json` and writes the bundled user/assistant exchanges into HydraDB under the current user's sub-tenant. Two details matter here: `infer: true` lets HydraDB extract useful memory from those exchanges, and `custom_instructions` tells HydraDB what to look for while doing that extraction.
 
-- customer preferences
-- past problems
-- recurring topics
-- likely support context
+```ts title="customer-support-agent/app/api/onboard/route.ts"
+import { NextResponse } from "next/server"
+import { normalizeDemoUserId } from "@/lib/user"
+import { getHydraClient, TENANT_ID } from "@/lib/hydradb"
 
-So instead of starting from zero, the assistant begins with a memory baseline.
+import conversationData from "@/data/conversation.json"
 
-### 4. Knowledge Recall Answers "What Does The Business Know?"
-
-Shared knowledge is usually recalled from the app's common support space.
-
-```ts
-async function recallKnowledge(query: string) {
-  const response = await fetch("https://api.hydradb.com/recall/full_recall", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.HYDRADB_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      tenant_id: process.env.HYDRADB_TENANT_ID,
-      sub_tenant_id: process.env.HYDRADB_SUB_TENANT_ID,
-      query,
-      max_results: 6,
-    }),
-  });
-
-  return response.json();
+type UserAssistantPair = {
+  user: string
+  assistant: string
 }
-```
-
-Think of this as the answer to:
-
-> What company documents, policies, and support records matter for this question?
-
-For a refund question, this might return:
-
-- refund policy chunks
-- order records
-- terms and conditions
-
-### 5. User Memory Recall Answers "What Should We Remember About This Customer?"
-
-User memory is recalled separately from the shared knowledge base.
-
-```ts
-async function recallUserMemory(userId: string, query: string) {
-  const response = await fetch("https://api.hydradb.com/memory/recall", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.HYDRADB_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      tenant_id: process.env.HYDRADB_TENANT_ID,
-      user_id: userId,
-      query,
-    }),
-  });
-
-  return response.json();
-}
-```
-
-This is what keeps the assistant from answering every user as if they were anonymous.
-
-For example, memory might tell the agent that:
-
-- the customer already asked about the same order last week
-- they prefer short answers
-- they recently changed their address
-
-### 6. The Chat Route Retrieves Both In Parallel
-
-A clean server implementation retrieves both kinds of context at the same time.
-
-```ts
-async function getSupportContext(userId: string, question: string) {
-  const [memory, knowledge] = await Promise.all([
-    recallUserMemory(userId, question),
-    recallKnowledge(question),
-  ]);
-
-  return { memory, knowledge };
-}
-```
-
-This is a small detail, but it matters:
-
-- it keeps the route faster
-- it keeps the retrieval layers independent
-- it makes debugging easier because each source has a clear job
-
-### 7. Retrieved Context Is Turned Into A Prompt The Model Can Use
-
-Models work best when retrieved context is formatted clearly instead of dumped in as raw JSON.
-
-```ts
-function buildSystemPrompt({
-  memoryText,
-  knowledgeText,
-}: {
-  memoryText: string;
-  knowledgeText: string;
-}) {
-  return `
-You are a customer support assistant.
-
-Use the user memory for personalized context.
-Use the knowledge base for policy and business facts.
-
-User memory:
-${memoryText || "No relevant user memory found."}
-
-Knowledge base:
-${knowledgeText || "No relevant knowledge found."}
-
-If the answer is uncertain, say what is missing instead of guessing.
-  `.trim();
-}
-```
-
-The system prompt usually has three jobs:
-
-- define the assistant's role
-- inject retrieved context in a readable structure
-- tell the model how to behave when context is missing
-
-That last point is important for support systems. You want honest uncertainty, not confident guessing.
-
-### 8. The Vercel AI SDK Streams The Answer Back To The UI
-
-Once the context is assembled, the server can stream the response.
-
-```ts
-import { streamText } from "ai";
 
 export async function POST(req: Request) {
-  const { messages, userId } = await req.json();
-  const latestMessage = messages.at(-1)?.content ?? "";
+  const client = getHydraClient()
+  if (!client) {
+    return NextResponse.json(
+      {
+        error: "HYDRADB_API_KEY is not configured",
+        success: false,
+      },
+      { status: 503 },
+    )
+  }
 
-  const { memory, knowledge } = await getSupportContext(userId, latestMessage);
-  const system = buildSystemPrompt({
-    memoryText: formatMemory(memory),
-    knowledgeText: formatKnowledge(knowledge),
-  });
+  const payload = (await req.json()) as { userId?: unknown }
+  const userId = normalizeDemoUserId(payload.userId)
+
+  if (!userId) {
+    return NextResponse.json(
+      {
+        error: "A valid userId is required",
+        success: false,
+      },
+      { status: 400 },
+    )
+  }
+
+  try {
+    // Initialize user memory with conversation pairs
+    // This creates the sub_tenant_id in HydraDB for this user and stores conversation history
+    const conversationPairs = (conversationData.conversations ?? []) as UserAssistantPair[]
+    console.log(conversationPairs)
+    await client.upload.addMemory({
+      tenant_id: TENANT_ID,
+      sub_tenant_id: userId,
+      upsert: true,
+      memories: [
+        {
+          user_assistant_pairs: conversationPairs,
+          infer: true,
+          user_name: "HydraDB Customer",
+          custom_instructions: "Extract user preferences, issues, and support history from conversations",
+        },
+      ],
+    })
+
+    return NextResponse.json({
+      success: true,
+      message: "User onboarded successfully with conversation memory",
+      userId,
+      conversationCount: conversationPairs.length,
+    })
+  } catch (e) {
+    console.error("[api/onboard] addMemory failed:", e)
+    return NextResponse.json(
+      {
+        error: e instanceof Error ? e.message : "Failed to onboard user",
+        success: false,
+      },
+      { status: 502 },
+    )
+  }
+}
+```
+
+### 4. Turn Retrieval Into Prompt Context
+
+The model never sees raw HydraDB responses directly. The app converts retrieved chunks into readable text, labels them clearly, and always puts user memory before knowledge base context. That ordering is not accidental. It matches the support behavior the app wants: personalize first, then fill in policies and business facts from the shared knowledge base.
+
+```ts title="customer-support-agent/lib/prompt.ts"
+import type { HydraDB } from "@hydra_db/node"
+
+function formatChunks(
+  chunks: HydraDB.VectorStoreChunk[] | undefined,
+  label: string,
+): string {
+  if (!chunks?.length) {
+    return `(No ${label} results for this query.)`
+  }
+  return chunks
+    .map((chunk, index) => {
+      const title =
+        chunk.source_title ?? chunk.source_id ?? `chunk-${index + 1}`
+      const score =
+        chunk.relevancy_score != null
+          ? ` (score: ${Number(chunk.relevancy_score).toFixed(3)})`
+          : ""
+      return `### ${index + 1}. ${title}${score}\n${chunk.chunk_content}`
+    })
+    .join("\n\n")
+}
+
+export function formatRetrievalForPrompt(
+  knowledge: HydraDB.RetrievalResult | undefined,
+  preferences: HydraDB.RetrievalResult | undefined,
+): string {
+  const kb = formatChunks(knowledge?.chunks, "knowledge base")
+  const mem = formatChunks(preferences?.chunks, "user memory")
+
+  return [
+    "## User memory context (from HydraDB recall preferences)",
+    mem,
+    "",
+    "## Knowledge base context (from HydraDB full recall)",
+    kb,
+  ].join("\n")
+}
+```
+
+### 5. Run The Full Chat Loop
+
+Everything comes together in `/api/chat`. The route pulls the last user message out of the AI SDK payload, normalizes the user ID from either the request body or the `x-user-id` header, recalls both preferences and knowledge from HydraDB, builds the final system prompt, streams the answer with the Vercel AI SDK, and finally stores the completed user/assistant pair back into memory. If you understand this file, you understand the full behavior of the example.
+
+```ts title="customer-support-agent/app/api/chat/route.ts"
+import { normalizeDemoUserId } from "@/lib/user"
+import { formatRetrievalForPrompt } from "@/lib/prompt"
+import { getHydraClient, SUB_TENANT_ID, TENANT_ID } from "@/lib/hydradb"
+
+import { streamText, convertToModelMessages, type UIMessage } from "ai"
+
+export const maxDuration = 60
+
+function getLastUserText(messages: UIMessage[]): string | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]
+    if (m.role !== "user") continue
+    const text = m.parts
+      .filter((p): p is { type: "text"; text: string } => p.type === "text")
+      .map((p) => p.text)
+      .join("")
+    const trimmed = text.trim()
+    if (trimmed) return trimmed
+  }
+  return undefined
+}
+
+const BASE_SYSTEM = `You are a knowledgeable customer support assistant created by HydraDB.
+Use the provided HydraDB context when it helps answer the question.
+Prioritize user memory context over global knowledge when both are relevant.
+If context is missing or not relevant, rely on general knowledge and say so briefly.
+Be clear, concise, and professional.`
+
+export async function POST(req: Request) {
+  const payload = (await req.json()) as {
+    messages?: UIMessage[]
+    userId?: unknown
+  }
+  const messages = payload.messages ?? []
+
+  const userIdFromHeader = req.headers.get("x-user-id")
+  const userId =
+    normalizeDemoUserId(payload.userId) ??
+    normalizeDemoUserId(userIdFromHeader)
+
+  const effectiveSubTenantId = userId ?? (SUB_TENANT_ID || null)
+
+  const lastUserText = getLastUserText(messages)
+  const client = getHydraClient()
+
+  let hydraSection = ""
+  if (client && lastUserText) {
+    try {
+      const recallBody = {
+        tenant_id: TENANT_ID,
+        query: lastUserText,
+        max_results: 8,
+        alpha: 0.8,
+        recency_bias: 0,
+        ...(effectiveSubTenantId
+          ? { sub_tenant_id: effectiveSubTenantId }
+          : {}),
+      }
+
+      const preferences = await client.recall.recallPreferences(recallBody)
+      const knowledge = await client.recall.fullRecall(recallBody)
+
+      hydraSection = formatRetrievalForPrompt(knowledge, preferences)
+    } catch (e) {
+      console.error("[api/chat] HydraDB recall failed:", e)
+      hydraSection =
+        "(HydraDB recall failed; answering without retrieved context.)"
+    }
+  } else if (!client) {
+    hydraSection =
+      "(HydraDB is not configured; set HYDRADB_API_KEY for knowledge and memory.)"
+  }
+
+  const system =
+    hydraSection.length > 0
+      ? `${BASE_SYSTEM}\n\n${hydraSection}`
+      : BASE_SYSTEM
+
+  const modelMessages = await convertToModelMessages(messages)
 
   const result = streamText({
-    model: supportModel,
+    model: "openai/gpt-4o-mini",
     system,
-    messages,
-  });
-
-  return result.toUIMessageStreamResponse();
-}
-```
-
-Why streaming matters:
-
-- users get feedback immediately
-- long answers feel faster
-- the UI feels like a real support assistant instead of a blocking form submit
-
-### 9. The New Exchange Is Saved Back As Memory
-
-After the answer is complete, the app stores the new conversation so the next turn has more context.
-
-```ts
-async function saveExchange(
-  userId: string,
-  userMessage: string,
-  assistantMessage: string,
-) {
-  await fetch("https://api.hydradb.com/memory/add", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.HYDRADB_API_KEY}`,
-      "Content-Type": "application/json",
+    messages: modelMessages,
+    abortSignal: req.signal,
+    onFinish: async ({ text }) => {
+      if (!client || !lastUserText || !text?.trim()) return
+      try {
+        await client.upload.addMemory({
+          tenant_id: TENANT_ID,
+          upsert: true,
+          ...(effectiveSubTenantId
+            ? { sub_tenant_id: effectiveSubTenantId }
+            : {}),
+          memories: [
+            {
+              user_assistant_pairs: [
+                { user: lastUserText, assistant: text.trim() },
+              ],
+              infer: true,
+            },
+          ],
+        })
+      } catch (e) {
+        console.error("[api/chat] HydraDB addMemory failed:", e)
+      }
     },
-    body: JSON.stringify({
-      tenant_id: process.env.HYDRADB_TENANT_ID,
-      user_id: userId,
-      content: `User: ${userMessage}\nAssistant: ${assistantMessage}`,
-      infer: true,
-    }),
-  });
+  })
+
+  return result.toUIMessageStreamResponse()
 }
 ```
-
-This is the compounding part of the system:
-
-- question one creates context for question two
-- question two creates context for question three
-- over time the assistant becomes more familiar with the customer
-
-### 10. The Side Panels Are More Than UI Decoration
-
-The Knowledge Base and User Memories panels are useful because they expose the app's hidden state.
-
-When the assistant sounds generic, check the panels:
-
-- if knowledge is empty, your uploads or tenant settings are probably wrong
-- if user memory is empty, onboarding or memory writes probably failed
-- if both are present but the answer is still weak, the prompt or model instructions need work
-
-This makes the example easier to learn from because you can inspect the retrieval inputs instead of guessing.
 
 ## Summary
 
-This example is valuable because it shows a complete support loop, not just a chat box:
-
-- HydraDB stores shared business knowledge
-- HydraDB stores customer-specific memory
-- the server retrieves both before every answer
-- the Vercel AI SDK streams the response
-- the app saves the final exchange back as memory
-
-That is the essential pattern behind a support agent that can be both accurate and personal.
+This example shows the full support-agent loop in one place. It gives the app a stable user identity, seeds useful memory for new users, keeps shared knowledge separate from personal memory, formats both into prompt-ready context, and then runs everything through a chat route that recalls, streams, and writes memory back after each reply. This combination is what makes the assistant feel grounded instead of generic. It can answer with business context, remember the customer across turns, and improve over time because every completed exchange becomes part of the next one.
